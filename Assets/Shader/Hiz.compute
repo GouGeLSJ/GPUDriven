@@ -1,0 +1,15 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CalHiz
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float> HizTex;
+Texture2D<float> DepthTex;
+float uvScale;
+
+[numthreads(16,8,1)]
+void CalHiz(uint3 id : SV_DispatchThreadID)
+{
+    float2 nowUV = id.xy * uvScale;
+    HizTex[id.xy] = min(min(DepthTex[nowUV], DepthTex[nowUV + float2(1, 0)]), min(DepthTex[nowUV + float2(0, 1)], DepthTex[nowUV + float2(1, 1)]));
+}

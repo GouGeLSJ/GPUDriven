@@ -1,0 +1,104 @@
+#pragma kernel CullTerrain
+#pragma kernel CullTerrainShadow
+
+
+struct NodeInfoData
+{
+    float4 rect;
+    int mipmap;
+    int neighbor;
+};
+//Matrix4x4 v = Camera.main.worldToCameraMatrix;
+//Matrix4x4 p = Camera.main.projectionMatrix; //unity C# use opengl standard projection matrix
+//cullingComputeShader.SetMatrix("_VPMatrix", p * v); //set from C#
+float4x4 _VPMatrix;
+Texture2D<float> _HeightMap;
+Texture2D<float> _HiZMap;
+float4 _HizSize;
+StructuredBuffer<NodeInfoData> _AllInstancesPosWSBuffer; //will not change until instance count change
+AppendStructuredBuffer<uint> _VisibleInstancesOnlyPosWSIDBuffer; //will set counter to 0 per frame, then fill in by this compute shader
+float4 _ShadowBias;
+float3 _LightDirection;
+float _TerrainHeightSize;
+
+float3 ApplyShadowBias(float3 positionWS, float3 normalWS, float3 lightDirection)
+{
+    float invNdotL = 1.0 - saturate(dot(lightDirection, normalWS));
+    float scale = invNdotL * _ShadowBias.y;
+
+    // normal bias is negative since we want to apply an inset normal offset
+    positionWS = lightDirection * _ShadowBias.xxx + positionWS;
+    positionWS = normalWS * scale.xxx + positionWS;
+    return positionWS;
+}
+
+[numthreads(64,1,1)]
+void CullTerrain (uint3 id : SV_DispatchThreadID)
+{
+    float4 nowRect = _AllInstancesPosWSBuffer[id.x].rect;
+    float2 minPos = nowRect.xy;
+    float2 maxPos = nowRect.xy + nowRect.zw;
+    float4 heights = float4(_HeightMap[minPos],
+                            _HeightMap[maxPos],
+                            _HeightMap[float2(minPos.x, maxPos.y)],
+                            _HeightMap[float2(maxPos.x, minPos.y)]);
+    float minHeight = _TerrainHeightSize * min(min(heights.x, heights.y), min(heights.z, heights.w));
+    float maxHeight = _TerrainHeightSize * max(max(heights.x, heights.y), max(heights.z, heights.w));
+    float4 boundVerts[8];
+    boundVerts[0] = float4(minPos.x, minHeight, minPos.y, 1);
+    boundVerts[1] = float4(minPos.x, minHeight, maxPos.y, 1);
+    boundVerts[2] = float4(maxPos.x, minHeight, minPos.y, 1);
+    boundVerts[3] = float4(maxPos.x, minHeight, maxPos.y, 1);
+    boundVerts[4] = float4(minPos.x, maxHeight, minPos.y, 1);
+    boundVerts[5] = float4(minPos.x, maxHeight, maxPos.y, 1);
+    boundVerts[6] = float4(maxPos.x, maxHeight, minPos.y, 1);
+    boundVerts[7] = float4(maxPos.x, maxHeight, maxPos.y, 1);
+    bool visible = false;
+    for (int i = 0; i < 8;i++)
+    {
+        float4 posCS = mul(_VPMatrix, boundVerts[i]);
+        //posCS.xyz = posCS.xyz / posCS.w;
+        float2 hizCoord = _HizSize.xy * 0.25 * (float2(posCS.x / posCS.w, posCS.y / posCS.w) * 0.5 + 0.5);
+        float4 absPosCS = abs(posCS);
+        if (absPosCS.z <= absPosCS.w && absPosCS.y <= absPosCS.w && absPosCS.x <= absPosCS.w && (1 - _HiZMap.mips[2][hizCoord]) * posCS.w > posCS.z)
+            visible = true;
+    }
+    
+    if (visible)
+        _VisibleInstancesOnlyPosWSIDBuffer.Append(id.x);
+}
+
+[numthreads(64, 1, 1)]
+void CullTerrainShadow(uint3 id : SV_DispatchThreadID)
+{
+    float4 nowRect = _AllInstancesPosWSBuffer[id.x].rect;
+    float2 minPos = nowRect.xy;
+    float2 maxPos = nowRect.xy + nowRect.zw;
+    float4 heights = float4(_HeightMap[minPos],
+                            _HeightMap[maxPos],
+                            _HeightMap[float2(minPos.x, maxPos.y)],
+                            _HeightMap[float2(maxPos.x, minPos.y)]);
+    float minHeight = 600 * min(min(heights.x, heights.y), min(heights.z, heights.w));
+    float maxHeight = 600 * max(max(heights.x, heights.y), max(heights.z, heights.w));
+    float4 boundVerts[8];
+    boundVerts[0] = float4(minPos.x, minHeight, minPos.y, 1);
+    boundVerts[1] = float4(minPos.x, minHeight, maxPos.y, 1);
+    boundVerts[2] = float4(maxPos.x, minHeight, minPos.y, 1);
+    boundVerts[3] = float4(maxPos.x, minHeight, maxPos.y, 1);
+    boundVerts[4] = float4(minPos.x, maxHeight, minPos.y, 1);
+    boundVerts[5] = float4(minPos.x, maxHeight, maxPos.y, 1);
+    boundVerts[6] = float4(maxPos.x, maxHeight, minPos.y, 1);
+    boundVerts[7] = float4(maxPos.x, maxHeight, maxPos.y, 1);
+    bool visible = false;
+    for (int i = 0; i < 8; i++)
+    {
+        boundVerts[i].xyz = ApplyShadowBias(boundVerts[i].xyz, float3(0, 1, 0), _LightDirection);
+        float4 posCS = mul(_VPMatrix, boundVerts[i]);
+        float4 absPosCS = abs(posCS);
+        if (absPosCS.y <= absPosCS.w && absPosCS.x <= absPosCS.w)   //近裁剪面不能使用
+            visible = true;
+    }
+    
+    if (visible)
+        _VisibleInstancesOnlyPosWSIDBuffer.Append(id.x);
+}
